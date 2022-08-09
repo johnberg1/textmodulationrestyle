@@ -7,6 +7,13 @@ import clip
 from PIL import Image
 from tqdm import tqdm
 
+def run_alignment(image_path):
+    import dlib
+    from scripts.align_faces_parallel import align_face
+    predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+    aligned_image = align_face(filepath=image_path, predictor=predictor)
+    # print("Aligned image has shape: {}".format(aligned_image.size))
+    return aligned_image 
 # captions_dict = {
 #                  "Blond_Hair" : "This person has blond hair.",
 #                  "Bushy_Eyebrows" : "This person has bushy eyebrows.",
@@ -53,14 +60,14 @@ for m in range(len(data_label)):
     
 gender_index = 20
 
-# image_folder = "/scratch/users/abaykal20/sam/SAM/attribute_classification/"
-# image_folder = "attribute_classification/"
+# image_folder = "/scratch/users/abaykal20/sam/SAM/aligned_attribute_classification/"
+# image_folder = "/scratch/users/abaykal20/hairclip/HairCLIP/mapper/aligned_attribute_classification/"
 # image_folder = "/scratch/users/abaykal20/TediGAN/base/attribute_classification/"
-# image_folder = "/scratch/users/abaykal20/stylemc/fixed_attr/"
-# image_folder = "/scratch/users/abaykal20/StyleCLIP/fixed_attr/"
-# image_folder = "/scratch/users/abaykal20/StyleCLIP/global_directions/attr/"
-image_folder = "/scratch/users/abaykal20/restyle-encoder/attribute_classification/"
-experiment = "align/1_step/"
+# image_folder = "/scratch/users/abaykal20/stylemc/aligned_attr/"
+# image_folder = "/scratch/users/abaykal20/StyleCLIP/lo_aligned/"
+# image_folder = "/scratch/users/abaykal20/StyleCLIP/global_directions/aligned_attr/"
+image_folder = "/scratch/users/abaykal20/restyle-encoder/aligned_attribute_classification/"
+experiment = "augment/3_step/"
 
 inference_images_path = "/scratch/users/abaykal20/LACE/FFHQ/prepare_models_data/label_indexes"
 images_path = "/datasets/CelebA/Img/img_align_celeba/"
@@ -75,8 +82,8 @@ images_path = "/datasets/CelebA/Img/img_align_celeba/"
 clip_model, clip_preprocess = clip.load("ViT-B/32", device='cuda')
 
 img_transforms = transforms.Compose([
-            transforms.CenterCrop((178,178)),
-            transforms.Resize((256, 256)),
+            # transforms.CenterCrop((178,178)),
+            # transforms.Resize((256, 256)),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
 
@@ -100,10 +107,15 @@ for key, value in tqdm(captions_dict.items()):
             gender = "male"
         caption = value[gender]
         
-        complete_image_path = os.path.join(images_path, img_idx)
+        # complete_image_path = os.path.join(images_path, img_idx)
+        complete_image_path = "/scratch/users/abaykal20/restyle-encoder/metric_images/" + key + "/{}.jpg".format(i)
         original_image = Image.open(complete_image_path).convert("RGB")
+        # aligned_image = run_alignment(complete_image_path)
+        # if aligned_image is None:
+            # input_image = img_transforms(original_image)
+        # else:
+            # input_image = img_transforms2(aligned_image)
         input_image = img_transforms(original_image)
-        
         manipulated_image_path = image_folder + experiment + key + "/" + f"{i}.jpg"
         manipulated_image = Image.open(manipulated_image_path).convert("RGB")
         manipulated_image_tensor = img_transforms2(manipulated_image)

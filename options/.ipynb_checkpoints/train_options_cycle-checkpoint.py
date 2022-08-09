@@ -53,6 +53,8 @@ class TrainOptions:
                                  help='Moco feature loss multiplier factor')
         self.parser.add_argument('--clip_lambda', default=0, type=float,
                                  help='Moco feature loss multiplier factor')
+        self.parser.add_argument('--cycle_lambda', default=1.0, type=float,
+                                 help='Moco feature loss multiplier factor')
 
         # weights and checkpoint paths
         self.parser.add_argument('--stylegan_weights', default=model_paths['stylegan_ffhq'], type=str,

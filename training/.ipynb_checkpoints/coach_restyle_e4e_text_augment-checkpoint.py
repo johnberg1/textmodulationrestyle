@@ -42,6 +42,9 @@ class Coach:
 		self.net = e4e(self.opts).to(self.device)
 		self.net.encoder.set_progressive_stage(ProgressiveStage(18)) # predict all latents
 		self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device = self.device)
+		self.augment_direction = torch.load('pose_direction.pt').to(self.device)
+		self.augment_direction.requires_grad = False
+		self.face_pool = torch.nn.AdaptiveAvgPool2d((256, 256))
 
 		# Estimate latent_avg via dense sampling if latent_avg is not available
 		if self.net.latent_avg is None:
@@ -119,7 +122,7 @@ class Coach:
 			prev_train_checkpoint = None
             
 		if self.opts.use_wandb:
-			wandb.init(project="re-style e4e")
+			wandb.init(project="re-style e4e with augmentation")
 			wandb.config = {"iterations" : self.opts.max_steps, "learning_rate" : self.opts.learning_rate}
 
 	def load_from_train_checkpoint(self, ckpt):
@@ -146,7 +149,7 @@ class Coach:
 	def perform_train_iteration_on_batch(self, x, y):
 		y_hat, latent = None, None
 		# y_hats = {idx: [] for idx in range(x.shape[0])}
-		for iter in range(self.opts.n_iters_per_batch):
+		for iter in range(5):
 			if iter == 0:
 				avg_image_for_batch = self.avg_image.unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
 				x_input = torch.cat([x, avg_image_for_batch], dim=1)
@@ -168,20 +171,24 @@ class Coach:
 
 		return y_hat, latent
     
-	def perform_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text):
+	def perform_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text, apply_augment, coefficients=None):
 		y_hat, latent = initial_inversion, initial_latent
 		loss_dict, id_logs = None, None
 		y_hats = {idx: [] for idx in range(x.shape[0])}
+		bs = x.shape[0]
 		for iter in range(self.opts.n_iters_per_batch):
 			y_hat_clone = y_hat.clone().detach().requires_grad_(True)
 			latent_clone = latent.clone().detach().requires_grad_(True)
 			x_input = torch.cat([x, y_hat_clone], dim=1)
 			y_hat, latent = self.net.forward_text(x_input, txt_embed, latent=latent_clone, return_latents=True)
-                
-			if self.opts.dataset_type == "cars_encode":
-				y_hat = y_hat[:, :, 32:224, :]
+            
+			y_recovered = None
+			if apply_augment:
+				recovered_latent = latent[:bs//2] - coefficients * self.augment_direction
+				y_recovered, _ = self.net.decoder([recovered_latent], input_is_latent=True,randomize_noise=False,return_latents=False)
+				y_recovered = self.face_pool(y_recovered)
 
-			loss, loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, y, mismatch_text)
+			loss, loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, y, mismatch_text, apply_augment=apply_augment, y_recovered=y_recovered)
 			loss.backward()
 			# store intermediate outputs
 			for idx in range(x.shape[0]):
@@ -215,7 +222,27 @@ class Coach:
 				self.optimizer.zero_grad()
 				with torch.no_grad():
 					y_hat, latent = self.perform_train_iteration_on_batch(x, y)
-				y_hats, encoder_loss_dict, id_logs = self.perform_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch, mismatch_text)
+                    
+                # AUGMENTATION every 5 iterations
+				apply_augment = False
+				if self.global_step % 5 == 0:
+					with torch.no_grad():
+						apply_augment = True
+						coefficients = 4.0 + torch.rand(x.shape[0]).to(self.device) * -10.0
+						coefficients = coefficients.unsqueeze(1).unsqueeze(2)  
+						latent = latent + coefficients * self.augment_direction
+						x_aug, _ = self.net.decoder([latent], input_is_latent=True,randomize_noise=False,return_latents=False)
+						x_aug = self.face_pool(x_aug).detach()
+						y_aug = x_aug.detach()
+						x = torch.cat((x_aug, x), 0)
+						y = torch.cat((y_aug, y), 0)
+						txt_embed_mismatch = torch.cat((txt_embed_mismatch,txt_embed_mismatch),0)
+						text_mismatch = torch.cat((text_mismatch,text_mismatch),0)
+						text_original = torch.cat((text_original,text_original),0)
+						y_hat, latent = self.perform_train_iteration_on_batch(x, y)
+					           
+				y_hats, encoder_loss_dict, id_logs = self.perform_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch,\
+                                                                                          mismatch_text, apply_augment, coefficients = coefficients)
 				self.optimizer.step()
 
 				loss_dict = {**disc_loss_dict, **encoder_loss_dict}
@@ -245,19 +272,18 @@ class Coach:
 				if self.global_step == self.opts.max_steps:
 					print('OMG, finished training!')
 					break
-				if mismatch_text:
-					wandb.log({"l2_loss": loss_dict['loss_l2'], 
-                               "lpips_loss": loss_dict['loss_lpips'], 
-                               "directional_loss": loss_dict['loss_directional'], 
-                               "id_loss": loss_dict['loss_id'], 
-                               "disc_loss": loss_dict['discriminator_loss'], 
-                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
-				else:
-					wandb.log({"l2_loss": loss_dict['loss_l2'], 
+                    
+				if self.opts.use_wandb:
+					wandb_dict = {"l2_loss": loss_dict['loss_l2'], 
                                "lpips_loss": loss_dict['loss_lpips'], 
                                "id_loss": loss_dict['loss_id'], 
                                "disc_loss": loss_dict['discriminator_loss'], 
-                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
+                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']}
+					if mismatch_text:
+						wandb_dict["directional_loss"] = loss_dict['loss_directional']
+					if self.global_step % 5 == 0:
+						wandb_dict["pose_consistency_loss"] = loss_dict['loss_pose_consistency']
+					wandb.log(wandb_dict)
 
 				self.global_step += 1
 				# if self.opts.progressive_steps:
@@ -388,7 +414,7 @@ class Coach:
 		print("Number of test samples: {}".format(len(test_dataset)), flush=True)
 		return train_dataset, test_dataset
 
-	def calc_loss(self, x, y, y_hat, source_text, target_text, latent, directional_source, mismatch_text):
+	def calc_loss(self, x, y, y_hat, source_text, target_text, latent, directional_source, mismatch_text, apply_augment=False, y_recovered=None):
 		loss_dict = {}
 		loss = 0.0
 		id_logs = None
@@ -426,6 +452,12 @@ class Coach:
 			loss_directional = self.directional_loss(directional_source, y_hat, source_text, target_text).mean()
 			loss_dict[f'loss_directional'] = float(loss_directional)
 			loss += loss_directional * self.opts.clip_lambda
+		if apply_augment:
+			bs = x.shape[0]
+			loss_id_pose, _, _ = self.id_loss(y_recovered, y_hat[bs//2:], x[bs//2:])
+			loss_lpips_pose = self.lpips_loss(y_recovered, y_hat[bs//2:])
+			loss_dict['loss_pose_consistency'] = float(loss_id_pose + loss_lpips_pose)
+			loss += loss_id_pose * self.opts.id_lambda + loss_lpips_pose * self.opts.lpips_lambda
       
         # MAYBE INCLUDE THE W NORM LOSS
 

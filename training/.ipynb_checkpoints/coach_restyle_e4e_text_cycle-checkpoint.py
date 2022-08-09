@@ -119,7 +119,7 @@ class Coach:
 			prev_train_checkpoint = None
             
 		if self.opts.use_wandb:
-			wandb.init(project="re-style e4e")
+			wandb.init(project="re-style e4e cycle")
 			wandb.config = {"iterations" : self.opts.max_steps, "learning_rate" : self.opts.learning_rate}
 
 	def load_from_train_checkpoint(self, ckpt):
@@ -134,16 +134,16 @@ class Coach:
 		# 	self.check_for_progressive_training_update(is_resume_from_ckpt=True)
 		print(f'Resuming training from step {self.global_step}')
 
-	def compute_discriminator_loss(self, x):
+	def compute_discriminator_loss(self, x, data_type='real'):
 		avg_image_for_batch = self.avg_image.unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
 		avg_image_for_batch.clone().detach().requires_grad_(True)
 		x_input = torch.cat([x, avg_image_for_batch], dim=1)
 		disc_loss_dict = {}
 		if self.is_training_discriminator():
-			disc_loss_dict = self.train_discriminator(x_input)
+			disc_loss_dict = self.train_discriminator(x_input, data_type=data_type)
 		return disc_loss_dict
 
-	def perform_train_iteration_on_batch(self, x, y):
+	def perform_train_iteration_on_batch(self, x):
 		y_hat, latent = None, None
 		# y_hats = {idx: [] for idx in range(x.shape[0])}
 		for iter in range(self.opts.n_iters_per_batch):
@@ -168,7 +168,7 @@ class Coach:
 
 		return y_hat, latent
     
-	def perform_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text):
+	def perform_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text, data_type='real'):                                     
 		y_hat, latent = initial_inversion, initial_latent
 		loss_dict, id_logs = None, None
 		y_hats = {idx: [] for idx in range(x.shape[0])}
@@ -181,7 +181,7 @@ class Coach:
 			if self.opts.dataset_type == "cars_encode":
 				y_hat = y_hat[:, :, 32:224, :]
 
-			loss, loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, y, mismatch_text)
+			loss, loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, x, mismatch_text, data_type=data_type)
 			loss.backward()
 			# store intermediate outputs
 			for idx in range(x.shape[0]):
@@ -210,19 +210,36 @@ class Coach:
 					txt_embed_mismatch = txt_embed_original
 					text_mismatch = text_original
 
-				disc_loss_dict = self.compute_discriminator_loss(x)
-
+				disc_loss_dict = self.compute_discriminator_loss(x, data_type='real')
+                
+                # FORWARD PASS
 				self.optimizer.zero_grad()
 				with torch.no_grad():
-					y_hat, latent = self.perform_train_iteration_on_batch(x, y)
-				y_hats, encoder_loss_dict, id_logs = self.perform_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch, mismatch_text)
-				self.optimizer.step()
-
+					y_hat, latent = self.perform_train_iteration_on_batch(x)
+				y_hats, encoder_loss_dict, id_logs = self.perform_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch, mismatch_text, data_type='real')
 				loss_dict = {**disc_loss_dict, **encoder_loss_dict}
+                
+                # CYCLE PASS
+				y_hat_clone = y_hat.clone().detach().requires_grad_(True)
+				txt_embed_clone = txt_embed_original.clone().detach().requires_grad_(True)
+				text_clone = text_original
+                
+				disc_loss_dict = self.compute_discriminator_loss(y_hat_clone, data_type='cycle')
+                
+				with torch.no_grad():
+					y_hat_cycle, latent_cycle = self.perform_train_iteration_on_batch(y_hat_clone)
+				y_recovereds, cycle_loss_dict, cycle_id_logs = self.perform_text_iteration_on_batch(y_hat_clone, y, y_hat_cycle, latent_cycle, txt_embed_clone, text_mismatch ,text_clone, mismatch_text, data_type='cycle')
+				self.optimizer.step()   
+                
+                # combine the logs of both forwards
+				for idx, cycle_log in enumerate(cycle_id_logs):
+					id_logs[idx].update(cycle_log)
+				loss_dict.update(cycle_loss_dict)
+				loss_dict["loss"] = loss_dict["loss_real"] + loss_dict["loss_cycle"]
 
 				# Logging related
 				if self.global_step % self.opts.image_interval == 0 or (self.global_step < 1000 and self.global_step % 25 == 0):
-					self.parse_and_log_images(id_logs, x, y, y_hats, txt, mismatch_text, title='images/train')
+					self.parse_and_log_images(id_logs, x, y, y_hats, y_recovereds, txt, mismatch_text, title='images/train')
 
 				if self.global_step % self.opts.board_interval == 0:
 					self.print_metrics(loss_dict, prefix='train')
@@ -246,24 +263,24 @@ class Coach:
 					print('OMG, finished training!')
 					break
 				if mismatch_text:
-					wandb.log({"l2_loss": loss_dict['loss_l2'], 
-                               "lpips_loss": loss_dict['loss_lpips'], 
-                               "directional_loss": loss_dict['loss_directional'], 
-                               "id_loss": loss_dict['loss_id'], 
-                               "disc_loss": loss_dict['discriminator_loss'], 
-                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
+					wandb.log({"l2_loss": loss_dict['loss_l2_real'], 
+                               "lpips_loss": loss_dict['loss_lpips_real'], 
+                               "directional_loss": loss_dict['loss_directional_real'], 
+                               "id_loss": loss_dict['loss_id_real'], 
+                               "disc_loss": loss_dict['discriminator_loss_real'], 
+                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss_real']})
 				else:
-					wandb.log({"l2_loss": loss_dict['loss_l2'], 
-                               "lpips_loss": loss_dict['loss_lpips'], 
-                               "id_loss": loss_dict['loss_id'], 
-                               "disc_loss": loss_dict['discriminator_loss'], 
-                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
+					wandb.log({"l2_loss": loss_dict['loss_l2_real'], 
+                               "lpips_loss": loss_dict['loss_lpips_real'], 
+                               "id_loss": loss_dict['loss_id_real'], 
+                               "disc_loss": loss_dict['discriminator_loss_real'], 
+                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss_real']})
 
 				self.global_step += 1
 				# if self.opts.progressive_steps:
 				# 	self.check_for_progressive_training_update()
     
-	def perform_val_iteration_on_batch(self, x, y):
+	def perform_val_iteration_on_batch(self, x):
 		y_hat, latent = None, None
 		for iter in range(self.opts.n_iters_per_batch):
 			if iter == 0:
@@ -278,7 +295,7 @@ class Coach:
 
 		return y_hat, latent
         
-	def perform_val_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text):
+	def perform_val_text_iteration_on_batch(self, x, y, initial_inversion, initial_latent, txt_embed, text_original, text_mismatch, mismatch_text, data_type='real'):
 		y_hat, latent = initial_inversion, initial_latent
 		cur_loss_dict, id_logs = None, None
 		y_hats = {idx: [] for idx in range(x.shape[0])}
@@ -289,7 +306,7 @@ class Coach:
 			if self.opts.dataset_type == "cars_encode":
 				y_hat = y_hat[:, :, 32:224, :]
                 
-			loss, cur_loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, y, mismatch_text)     
+			loss, cur_loss_dict, id_logs = self.calc_loss(x, y, y_hat, text_original, text_mismatch, latent, y, mismatch_text, data_type=data_type)     
             
 			# store intermediate outputs
 			for idx in range(x.shape[0]):
@@ -315,7 +332,7 @@ class Coach:
 				else:
 					txt_embed_mismatch = txt_embed_original
 					text_mismatch = text_original
-
+            
 			# validate discriminator on batch
 			avg_image_for_batch = self.avg_image.unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
 			x_input = torch.cat([x, avg_image_for_batch], dim=1)
@@ -323,16 +340,34 @@ class Coach:
 			if self.is_training_discriminator():
 				cur_disc_loss_dict = self.validate_discriminator(x_input)
 
-			# validate encoder on batch
+                
+			# validate encoder on batch -- FORWARD PASS
 			with torch.no_grad():
-				y_hat, latent = self.perform_val_iteration_on_batch(x, y)
-				y_hats, cur_enc_loss_dict, id_logs = self.perform_val_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch, mismatch_text)    
+				y_hat, latent = self.perform_val_iteration_on_batch(x)
+				y_hats, cur_enc_loss_dict, id_logs = self.perform_val_text_iteration_on_batch(x, y, y_hat, latent, txt_embed_mismatch, text_original, text_mismatch, mismatch_text, data_type='real')    
 
 			cur_loss_dict = {**cur_disc_loss_dict, **cur_enc_loss_dict}
+            
+            # validate encoder on batch -- CYCLE PASS
+			with torch.no_grad():
+				y_hat_clone = y_hat.clone().detach().requires_grad_(True)
+				txt_embed_clone = txt_embed_original.clone().detach().requires_grad_(True)
+				text_clone = text_original
+                
+				y_hat_cycle, latent_cycle = self.perform_val_iteration_on_batch(y_hat_clone)
+				y_recovereds, cycle_loss_dict, cycle_id_logs = self.perform_val_text_iteration_on_batch(y_hat_clone, y, y_hat_cycle, latent_cycle, txt_embed_clone, text_mismatch ,text_clone, mismatch_text, data_type='cycle') 
+            
+            
+				# combine the logs of both forwards
+				for idx, cycle_log in enumerate(cycle_id_logs):
+					id_logs[idx].update(cycle_log)
+				cur_loss_dict.update(cycle_loss_dict)
+				cur_loss_dict["loss"] = cur_loss_dict["loss_real"] + cur_loss_dict["loss_cycle"]
 			agg_loss_dict.append(cur_loss_dict)
+            
 
 			# Logging related
-			self.parse_and_log_images(id_logs, x, y, y_hats, txt, mismatch_text,
+			self.parse_and_log_images(id_logs, x, y, y_hats, y_recovereds, txt, mismatch_text,
 									  title='images/test',
 									  subscript='{:04d}'.format(batch_idx))
 
@@ -388,14 +423,14 @@ class Coach:
 		print("Number of test samples: {}".format(len(test_dataset)), flush=True)
 		return train_dataset, test_dataset
 
-	def calc_loss(self, x, y, y_hat, source_text, target_text, latent, directional_source, mismatch_text):
+	def calc_loss(self, x, y, y_hat, source_text, target_text, latent, directional_source, mismatch_text, data_type="real"):
 		loss_dict = {}
 		loss = 0.0
 		id_logs = None
 
 		# Adversarial loss
 		if self.is_training_discriminator():
-			loss_disc = self.compute_adversarial_loss(latent, loss_dict)
+			loss_disc = self.compute_adversarial_loss(latent, loss_dict, data_type=data_type)
 			loss += self.opts.w_discriminator_lambda * loss_disc
 
 		# delta regularization loss
@@ -406,33 +441,35 @@ class Coach:
 		# similarity losses
 		if self.opts.id_lambda > 0:
 			loss_id, sim_improvement, id_logs = self.id_loss(y_hat, y, x)
-			loss_dict['loss_id'] = float(loss_id)
-			loss_dict['id_improve'] = float(sim_improvement)
+			loss_dict[f'loss_id_{data_type}'] = float(loss_id)
+			loss_dict[f'id_improve_{data_type}'] = float(sim_improvement)
 			loss += loss_id * self.opts.id_lambda
 		if self.opts.l2_lambda > 0:
 			loss_l2 = F.mse_loss(y_hat, y)
-			loss_dict['loss_l2'] = float(loss_l2)
+			loss_dict[f'loss_l2_{data_type}'] = float(loss_l2)
 			loss += loss_l2 * self.opts.l2_lambda
 		if self.opts.lpips_lambda > 0:
 			loss_lpips = self.lpips_loss(y_hat, y)
-			loss_dict['loss_lpips'] = float(loss_lpips)
+			loss_dict[f'loss_lpips_{data_type}'] = float(loss_lpips)
 			loss += loss_lpips * self.opts.lpips_lambda
 		if self.opts.moco_lambda > 0:
 			loss_moco, sim_improvement, id_logs = self.moco_loss(y_hat, y, x)
-			loss_dict['loss_moco'] = float(loss_moco)
-			loss_dict['id_improve'] = float(sim_improvement)
+			loss_dict[f'loss_moco_{data_type}'] = float(loss_moco)
+			loss_dict[f'id_improve_{data_type}'] = float(sim_improvement)
 			loss += loss_moco * self.opts.moco_lambda
 		if self.opts.clip_lambda > 0 and mismatch_text:
 			loss_directional = self.directional_loss(directional_source, y_hat, source_text, target_text).mean()
-			loss_dict[f'loss_directional'] = float(loss_directional)
+			loss_dict[f'loss_directional_{data_type}'] = float(loss_directional)
 			loss += loss_directional * self.opts.clip_lambda
       
         # MAYBE INCLUDE THE W NORM LOSS
 
-		loss_dict['loss'] = float(loss)
+		loss_dict[f'loss_{data_type}'] = float(loss)
+		if data_type == "cycle":
+			loss = loss * self.opts.cycle_lambda
 		return loss, loss_dict, id_logs
 
-	def compute_adversarial_loss(self, latent, loss_dict):
+	def compute_adversarial_loss(self, latent, loss_dict, data_type='real'):
 		loss_disc = 0.
 		dims_to_discriminate = list(range(self.net.decoder.n_latent))# self.get_dims_to_discriminate() if self.is_progressive_training() else list(range(self.net.decoder.n_latent))
 		for i in dims_to_discriminate:
@@ -440,7 +477,7 @@ class Coach:
 			fake_pred = self.discriminator(w)
 			loss_disc += F.softplus(-fake_pred).mean()
 		loss_disc /= len(dims_to_discriminate)
-		loss_dict['mapper_discriminator_loss'] = float(loss_disc)
+		loss_dict[f'mapper_discriminator_loss_{data_type}'] = float(loss_disc)
 		return loss_disc
 
 	def compute_delta_regularization_loss(self, latent, loss_dict):
@@ -465,7 +502,7 @@ class Coach:
 		for key, value in metrics_dict.items():
 			print('\t{} = '.format(key), value)
 
-	def parse_and_log_images(self, id_logs, x, y, y_hat, txt, mismatch_text, title, subscript=None, display_count=2):
+	def parse_and_log_images(self, id_logs, x, y, y_hat, y_recovered, txt, mismatch_text, title, subscript=None, display_count=2):
 		im_data = []
 		for i in range(display_count):
 			if type(y_hat) == dict:
@@ -475,10 +512,18 @@ class Coach:
 				]
 			else:
 				output_face = [common.tensor2im(y_hat[i])]
+			if type(y_recovered) == dict:
+				recovered_face = [
+					[common.tensor2im(y_recovered[i][iter_idx][0]), y_recovered[i][iter_idx][1]]
+					for iter_idx in range(len(y_recovered[i]))
+				]
+			else:
+				recovered_face = [common.tensor2im(y_recovered[i])]
 			cur_im_data = {
 				'input_face': common.tensor2im(x[i]),
-				'target_face': common.tensor2im(y[i]),
+				# 'target_face': common.tensor2im(y[i]),
 				'output_face': output_face,
+				'recovered_face': recovered_face,
 			}
 			if id_logs is not None:
 				for key in id_logs[i]:
@@ -487,7 +532,7 @@ class Coach:
 		self.log_images(title, txt, mismatch_text, im_data=im_data, subscript=subscript)
 
 	def log_images(self, name, txt, mismatch_text, im_data, subscript=None, log_latest=False):
-		fig = common.vis_faces(im_data, txt, mismatch_text)
+		fig = common.vis_faces_cycle(im_data, txt, mismatch_text)
 		step = self.global_step
 		if log_latest:
 			step = 0
@@ -553,7 +598,7 @@ class Coach:
 		grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
 		return grad_penalty
 
-	def train_discriminator(self, x):
+	def train_discriminator(self, x, data_type='real'):
 		loss_dict = {}
 		self.requires_grad(self.discriminator, True)
 
@@ -562,7 +607,7 @@ class Coach:
 		real_pred = self.discriminator(real_w)
 		fake_pred = self.discriminator(fake_w)
 		loss = self.discriminator_loss(real_pred, fake_pred, loss_dict)
-		loss_dict['discriminator_loss'] = float(loss)
+		loss_dict[f'discriminator_loss_{data_type}'] = float(loss)
 
 		self.discriminator_optimizer.zero_grad()
 		loss.backward()

@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import clip
 import random
 import sys
+import wandb
 
 from utils import common, train_utils
 from criteria import id_loss, moco_loss
@@ -116,6 +117,10 @@ class Coach:
 		if prev_train_checkpoint is not None:
 			self.load_from_train_checkpoint(prev_train_checkpoint)
 			prev_train_checkpoint = None
+            
+		if self.opts.use_wandb:
+			wandb.init(project="re-style e4e")
+			wandb.config = {"iterations" : self.opts.max_steps, "learning_rate" : self.opts.learning_rate}
 
 	def load_from_train_checkpoint(self, ckpt):
 		print('Loading previous training data...')
@@ -240,6 +245,19 @@ class Coach:
 				if self.global_step == self.opts.max_steps:
 					print('OMG, finished training!')
 					break
+				if mismatch_text:
+					wandb.log({"l2_loss": loss_dict['loss_l2'], 
+                               "lpips_loss": loss_dict['loss_lpips'], 
+                               "directional_loss": loss_dict['loss_directional'], 
+                               "id_loss": loss_dict['loss_id'], 
+                               "disc_loss": loss_dict['discriminator_loss'], 
+                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
+				else:
+					wandb.log({"l2_loss": loss_dict['loss_l2'], 
+                               "lpips_loss": loss_dict['loss_lpips'], 
+                               "id_loss": loss_dict['loss_id'], 
+                               "disc_loss": loss_dict['discriminator_loss'], 
+                               "mapper_disc_loss": loss_dict['mapper_discriminator_loss']})
 
 				self.global_step += 1
 				# if self.opts.progressive_steps:

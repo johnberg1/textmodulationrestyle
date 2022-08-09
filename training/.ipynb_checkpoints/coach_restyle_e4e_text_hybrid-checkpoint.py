@@ -22,7 +22,7 @@ from configs import data_configs
 from datasets.images_text_dataset import ImagesTextDataset
 from criteria.lpips.lpips import LPIPS
 from criteria.clip_loss import DirectionalCLIPLoss
-from models.e4e import e4e
+from models.e4e_hybrid import e4e
 from training.ranger import Ranger
 from models.e4e_modules.latent_codes_pool import LatentCodesPool
 from models.e4e_modules.discriminator import LatentCodesDiscriminator
@@ -119,7 +119,7 @@ class Coach:
 			prev_train_checkpoint = None
             
 		if self.opts.use_wandb:
-			wandb.init(project="re-style e4e")
+			wandb.init(project="re-style e4e hybrid model")
 			wandb.config = {"iterations" : self.opts.max_steps, "learning_rate" : self.opts.learning_rate}
 
 	def load_from_train_checkpoint(self, ckpt):
@@ -363,6 +363,7 @@ class Coach:
 		self.requires_grad(self.net.encoder, False)
 		self.requires_grad(self.net.decoder, False)
 		self.requires_grad(self.net.mapper, True)
+		self.requires_grad(self.net.latent_mapper, True)
 		params = list(self.net.mapper.parameters())
 		if self.opts.optim_name == 'adam':
 			optimizer = torch.optim.Adam(params, lr=self.opts.learning_rate)

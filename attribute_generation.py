@@ -25,6 +25,14 @@ def get_avg_image(net):
     avg_image = avg_image.to('cuda').float().detach()
     return avg_image
 
+def run_alignment(image_path):
+    import dlib
+    from scripts.align_faces_parallel import align_face
+    predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+    aligned_image = align_face(filepath=image_path, predictor=predictor)
+    # print("Aligned image has shape: {}".format(aligned_image.size))
+    return aligned_image 
+
 # captions_dict = {"Blond_Hair" : "This person has blond hair.",
 #                  "Bushy_Eyebrows" : "This person has bushy eyebrows.",
 #                  "Chubby" : "This person is chubby.",
@@ -95,16 +103,21 @@ images_path = "/datasets/CelebA/Img/img_align_celeba/"
 
 EXPERIMENT_DATA_ARGS = {
     "celeba_encode": {
-        "model_path": "exp_text2/checkpoints/best_model.pt",
+        "model_path": "exp_text_augment_consistency2/checkpoints/best_model.pt",
         "e4e_path": "/scratch/users/abaykal20/sam/SAM/pretrained_models/e4e_ffhq_encode.pt",
         "transform": transforms.Compose([
-            transforms.CenterCrop((178,178)),
-            transforms.Resize((256, 256)),
+            # transforms.CenterCrop((178,178)),
+            # transforms.Resize((256, 256)),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
     }
 }
 EXPERIMENT_ARGS = EXPERIMENT_DATA_ARGS["celeba_encode"]
+# tf2 = transforms.Compose([
+#             transforms.CenterCrop((178,178)),
+#             transforms.Resize((256, 256)),
+#             transforms.ToTensor(),
+#             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
 
 print("Loading Models")
 model_path = EXPERIMENT_ARGS['model_path']
@@ -121,18 +134,20 @@ print("Model Succesfully Loaded!")
 clip_model, clip_preprocess = clip.load("ViT-B/32", device='cuda')
 print("Starting inference")
 
-exp_name = "4_step/"
-num_text_iters = 4
-if not os.path.isdir("attribute_classification/" + exp_name):
-    os.mkdir("attribute_classification/" + exp_name)
+exp_name = "3_step/"
+num_text_iters = 3
+if not os.path.isdir("aligned_attribute_classification/augment/" + exp_name):
+    os.mkdir("aligned_attribute_classification/augment/" + exp_name)
 
 img_transforms = EXPERIMENT_ARGS['transform']
 for key, value in captions_dict.items():
     inference_path = os.path.join(inference_images_path, key + ".txt")
     f2 = open(inference_path, "r")
     # custom_caption = value
-    if not os.path.isdir("attribute_classification/" + exp_name + key):
-        os.mkdir("attribute_classification/" + exp_name + key)
+    if not os.path.isdir("aligned_attribute_classification/augment/" + exp_name + key):
+        os.mkdir("aligned_attribute_classification/augment/" + exp_name + key)
+    # if not os.path.isdir("metric_images/" + key):
+    #     os.mkdir("metric_images/" + key)
     print("Generating", key)
     for i in tqdm(range(50)):
         img_idx = f2.readline().rstrip()
@@ -142,8 +157,15 @@ for key, value in captions_dict.items():
         else:
             gender = "male"
         custom_caption = value[gender]
-        complete_image_path = os.path.join(images_path, img_idx)
+        # complete_image_path = os.path.join(images_path, img_idx)
+        complete_image_path = "/scratch/users/abaykal20/restyle-encoder/metric_images/" + key + "/{}.jpg".format(i)
         original_image = Image.open(complete_image_path).convert("RGB")
+        # aligned_image = run_alignment(complete_image_path)
+        # if aligned_image is None:
+        #     input_image = tf2(original_image)
+        # else:
+        #     input_image = img_transforms(aligned_image)
+        # tensor2im(input_image).save("metric_images/" + key + "/" + "{}.jpg".format(i))
         input_image = img_transforms(original_image)
         input_image = input_image.unsqueeze(0)
         text_input = clip.tokenize(custom_caption)
@@ -154,7 +176,7 @@ for key, value in captions_dict.items():
             text_features = clip_model.encode_text(text_input).float()
 
             y_hat, latent = None, None
-            for iter in range(opts.n_iters_per_batch):
+            for iter in range(5):
                 if iter == 0:
                     avg_image_for_batch = avg_image.unsqueeze(0).repeat(input_image.shape[0], 1, 1, 1)
                     x_input = torch.cat([input_image, avg_image_for_batch], dim=1)
@@ -185,7 +207,7 @@ for key, value in captions_dict.items():
             result_image = tensor2im(result_tensor)
 
 
-            save_path = "attribute_classification/" + exp_name + key + "/"
+            save_path = "aligned_attribute_classification/augment/" + exp_name + key + "/"
             save_path = save_path + "{}.jpg".format(i)
             result_image.save(save_path)
     f2.close()

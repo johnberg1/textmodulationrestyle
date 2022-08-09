@@ -76,6 +76,9 @@ class TrainOptions:
                                  help='Model checkpoint interval')
         self.parser.add_argument('--continue_from_checkpoint', default=False, type=bool,
                                  help='Continue from checkpoint or not')
+        self.parser.add_argument('--use_wandb', default=False, type=bool,
+                                 help='Use wandb for logging losses')
+
 
         # arguments for iterative encoding
         self.parser.add_argument('--n_iters_per_batch', default=5, type=int,
