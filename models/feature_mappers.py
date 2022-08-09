@@ -11,7 +11,7 @@ class TextModulationModule(Module):
         super(TextModulationModule, self).__init__()
         self.conv = Conv2d(in_channels, in_channels, 3, stride=1, padding=1, bias=False)
         self.norm = InstanceNorm2d(in_channels)
-        self.mapping = Sequential(Linear(512, 512), LeakyReLU(), Linear(512, 512), LeakyReLU(), Linear(512, 512), LeakyReLU(), Linear(512, 512))
+#         self.mapping = Sequential(Linear(512, 512), LeakyReLU(), Linear(512, 512), LeakyReLU(), Linear(512, 512), LeakyReLU(), Linear(512, 512))
         self.gamma_function = Sequential(Linear(512, 512), LayerNorm([512]), LeakyReLU(), Linear(512, in_channels))
         self.beta_function = Sequential(Linear(512, 512), LayerNorm([512]), LeakyReLU(), Linear(512, in_channels))
         self.leakyrelu = LeakyReLU()
@@ -19,7 +19,7 @@ class TextModulationModule(Module):
     def forward(self, x, embedding):
         x = self.conv(x)
         x = self.norm(x)
-        embedding = self.mapping(embedding)
+#         embedding = self.mapping(embedding)
         log_gamma = self.gamma_function(embedding.float())
         gamma = log_gamma.exp().unsqueeze(2).unsqueeze(3)
         beta = self.beta_function(embedding.float()).unsqueeze(2).unsqueeze(3)
